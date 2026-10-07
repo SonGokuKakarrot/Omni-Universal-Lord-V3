@@ -34,9 +34,11 @@
 
   const resumeCtx = () => {
     if (window.__OmniLordAudioCtx && window.__OmniLordAudioCtx.state === 'suspended') {
-      window.__OmniLordAudioCtx.resume().catch(() => {});
+      window.__OmniLordAudioCtx.resume();
     }
   };
+  window.addEventListener('click', resumeCtx, { once: true });
+  window.addEventListener('touchstart', resumeCtx, { once: true });
   window.addEventListener('pointerdown', resumeCtx, { passive: true });
   window.addEventListener('keydown', resumeCtx);
 
@@ -242,7 +244,7 @@
       process(inputs, outputs, params) {
         const input = inputs[0], output = outputs[0];
         if (!input || !input.length || !input[0].length) return true;
-        const chN = Math.min(input.length, output.length, 8), len = input[0].length, stereo = chN >= 2;
+        const chN = Math.min(input.length, 8), len = input[0].length, stereo = chN >= 2;
         const buf = this._buf;
         const P = (p, i) => (p.length > 1 ? p[i] : p[0]);
         for (let i = 0; i < len; i++) {
@@ -252,7 +254,7 @@
           const mega = mg * (1 + rg / 50);
           const step = 1 / (br / 20);
           for (let ch = 0; ch < chN; ch++) {
-            let s = Number.isFinite(input[ch][i]) ? input[ch][i] : 0;
+            let s = input[ch][i];
             if (mu > 0.5) { buf[ch] = 0; continue; }
             if (ng > 0) {
               const th = ng / 100 * 0.015;
@@ -296,7 +298,7 @@
             buf[0] = Math.max(-0.9999, Math.min(0.9999, mid + side * wd));
             buf[1] = Math.max(-0.9999, Math.min(0.9999, mid - side * wd));
           }
-          for (let ch = 0; ch < output.length; ch++) output[ch][i] = buf[Math.min(ch, chN - 1)] || 0;
+          for (let ch = 0; ch < chN; ch++) output[ch][i] = buf[ch];
         }
         return true;
       }
@@ -316,17 +318,38 @@
       ctx = new NativeAudioContext({ latencyHint: "interactive" });
     }
     window.__OmniLordAudioCtx = ctx;
-    let blobUrl;
-    workletPromise = Promise.resolve().then(() => {
-      if (!ctx.audioWorklet) return false;
-      blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
-      return ctx.audioWorklet.addModule(blobUrl).then(() => true);
-    }).catch(() => false).finally(() => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-    });
+    const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
+    workletPromise = ctx.audioWorklet
+      ? ctx.audioWorklet.addModule(blobUrl)
+        .then(() => {
+          URL.revokeObjectURL(blobUrl);
+          if (window.__OmniLordPanelReady) window.__OmniLordPanelReady.setStatus("OMNI V2 DSP ONLINE");
+          return true;
+        })
+        .catch(() => {
+          URL.revokeObjectURL(blobUrl);
+          if (window.__OmniLordPanelReady) window.__OmniLordPanelReady.setStatus("WORKLET FAIL");
+          return false;
+        })
+      : Promise.resolve(false);
     return ctx;
   }
-  // Create audio resources only after capture or explicit music playback.
+  ensureProcessingContext();
+
+  function forceStereoOpusSDP(sdp) {
+    if (!sdp) return sdp;
+    const match = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
+    if (!match) return sdp;
+    const payloadType = match[1];
+    const fmtpRegex = new RegExp(`a=fmtp:${payloadType} [^\\r\\n]+`);
+    const customFmtp = `a=fmtp:${payloadType} minptime=10;useinbandfec=1;usedtx=0;stereo=1;maxaveragebitrate=510000;maxplaybackrate=48000;sprop-maxcapturerate=48000;cbr=1`;
+    if (fmtpRegex.test(sdp)) {
+      sdp = sdp.replace(fmtpRegex, customFmtp);
+    } else {
+      sdp = sdp.replace(new RegExp(`(a=rtpmap:${payloadType} opus\\/48000\\/2)`), `$1\r\n${customFmtp}`);
+    }
+    return sdp.replace(/b=AS:\d+/g, "b=AS:510");
+  }
 
   function wantsAudio(constraints) {
     if (constraints === true) return true;
@@ -360,9 +383,13 @@
 
         const source = audioCtx.createMediaStreamSource(mediaStream);
         const destination = audioCtx.createMediaStreamDestination();
+        try { destination.channelCount = 2; } catch (_) {}
 
         try {
-          const workletNode = new AudioWorkletNode(audioCtx, "omniLord-processor");
+          const workletNode = new AudioWorkletNode(audioCtx, "omniLord-processor", {
+            numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],
+            channelCount: 2, channelCountMode: "explicit"
+          });
           const freqs = [100, 250, 1000, 3000, 6000, 12000];
           const types = ["lowshelf", "peaking", "peaking", "peaking", "peaking", "highshelf"];
           const eqNodes = freqs.map((freq, i) => {
@@ -760,7 +787,7 @@
     getWorkletReady: () => workletPromise
   });
   window.__OmniCallGuard.install({
-    AudioInterceptor, currentState, ensureProcessingContext, wantsAudio,
+    AudioInterceptor, currentState, ensureProcessingContext, wantsAudio, forceStereoOpusSDP,
     report: (message) => window.__OmniLordPanelReady?.setStatus(message)
   });
 
