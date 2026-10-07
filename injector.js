@@ -34,11 +34,11 @@
 
   const resumeCtx = () => {
     if (window.__OmniLordAudioCtx && window.__OmniLordAudioCtx.state === 'suspended') {
-      window.__OmniLordAudioCtx.resume();
+      window.__OmniLordAudioCtx.resume().catch(() => {});
     }
   };
-  window.addEventListener('click', resumeCtx, { once: true });
-  window.addEventListener('touchstart', resumeCtx, { once: true });
+  window.addEventListener('pointerdown', resumeCtx, { passive: true });
+  window.addEventListener('keydown', resumeCtx);
 
   /* ============================ CONFIG ============================ */
 
@@ -242,7 +242,7 @@
       process(inputs, outputs, params) {
         const input = inputs[0], output = outputs[0];
         if (!input || !input.length || !input[0].length) return true;
-        const chN = Math.min(input.length, 8), len = input[0].length, stereo = chN >= 2;
+        const chN = Math.min(input.length, output.length, 8), len = input[0].length, stereo = chN >= 2;
         const buf = this._buf;
         const P = (p, i) => (p.length > 1 ? p[i] : p[0]);
         for (let i = 0; i < len; i++) {
@@ -252,7 +252,7 @@
           const mega = mg * (1 + rg / 50);
           const step = 1 / (br / 20);
           for (let ch = 0; ch < chN; ch++) {
-            let s = input[ch][i];
+            let s = Number.isFinite(input[ch][i]) ? input[ch][i] : 0;
             if (mu > 0.5) { buf[ch] = 0; continue; }
             if (ng > 0) {
               const th = ng / 100 * 0.015;
@@ -296,7 +296,7 @@
             buf[0] = Math.max(-0.9999, Math.min(0.9999, mid + side * wd));
             buf[1] = Math.max(-0.9999, Math.min(0.9999, mid - side * wd));
           }
-          for (let ch = 0; ch < chN; ch++) output[ch][i] = buf[ch];
+          for (let ch = 0; ch < output.length; ch++) output[ch][i] = buf[Math.min(ch, chN - 1)] || 0;
         }
         return true;
       }
@@ -316,33 +316,17 @@
       ctx = new NativeAudioContext({ latencyHint: "interactive" });
     }
     window.__OmniLordAudioCtx = ctx;
-    const blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
-    workletPromise = ctx.audioWorklet.addModule(blobUrl)
-      .then(() => {
-        URL.revokeObjectURL(blobUrl);
-        if (window.__OmniLordPanelReady) window.__OmniLordPanelReady.setStatus("OMNI V2 DSP ONLINE");
-      })
-      .catch(() => {
-        if (window.__OmniLordPanelReady) window.__OmniLordPanelReady.setStatus("WORKLET FAIL");
-      });
+    let blobUrl;
+    workletPromise = Promise.resolve().then(() => {
+      if (!ctx.audioWorklet) return false;
+      blobUrl = URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" }));
+      return ctx.audioWorklet.addModule(blobUrl).then(() => true);
+    }).catch(() => false).finally(() => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+    });
     return ctx;
   }
-  ensureProcessingContext();
-
-  function forceStereoOpusSDP(sdp) {
-    if (!sdp) return sdp;
-    const match = sdp.match(/a=rtpmap:(\d+) opus\/48000/);
-    if (!match) return sdp;
-    const payloadType = match[1];
-    const fmtpRegex = new RegExp(`a=fmtp:${payloadType} [^\\r\\n]+`);
-    const customFmtp = `a=fmtp:${payloadType} minptime=10;useinbandfec=1;usedtx=0;stereo=1;maxaveragebitrate=510000;maxplaybackrate=48000;sprop-maxcapturerate=48000;cbr=1`;
-    if (fmtpRegex.test(sdp)) {
-      sdp = sdp.replace(fmtpRegex, customFmtp);
-    } else {
-      sdp = sdp.replace(new RegExp(`(a=rtpmap:${payloadType} opus\\/48000\\/2)`), `$1\r\n${customFmtp}`);
-    }
-    return sdp.replace(/b=AS:\d+/g, "b=AS:510");
-  }
+  // Create audio resources only after capture or explicit music playback.
 
   function wantsAudio(constraints) {
     if (constraints === true) return true;
@@ -769,194 +753,15 @@
   PlayerEngine.init();
   setInterval(() => { if (PlayerEngine.playing) PlayerEngine.broadcastState(); }, 1000);
 
-  /* ============================ WEBRTC HOOKS ============================ */
-
-  const nativeReplaceTrack = window.RTCRtpSender?.prototype?.replaceTrack;
-
-  const watchedSenders = new WeakSet();
-  function watchSenderForTrackChanges(sender) {
-    if (!sender || watchedSenders.has(sender)) return;
-    watchedSenders.add(sender);
-    const check = () => {
-      const t = sender.track;
-      if (t && t.kind === "audio" && !t.__omniLordProcessed) {
-        AudioInterceptor.processTrack(t).then((processed) => {
-          if (processed && processed !== t && sender.replaceTrack) {
-            const chain = AudioInterceptor.chains.find((entry) => entry.outStream?.getAudioTracks().includes(processed));
-            if (chain) chain.sender = sender;
-            sender.replaceTrack(processed).catch(() => {});
-          }
-        }).catch(() => {});
-      }
-    };
-    check();
-    setInterval(check, 2000);
-  }
-
-  const NativePeerConnection = window.RTCPeerConnection;
-  function cleanupPeerConnection(pc) {
-    try {
-      pc.getSenders().forEach((sender) => {
-        const chain = AudioInterceptor.chains.find((entry) => entry.sender === sender);
-        if (chain) AudioInterceptor.cleanupChain(chain);
-      });
-    } catch (_) {}
-  }
-  if (NativePeerConnection) {
-    window.RTCPeerConnection = class extends NativePeerConnection {
-      constructor(...args) {
-        super(...args);
-        this.addEventListener("connectionstatechange", () => {
-          if (this.connectionState === "closed" || this.connectionState === "failed") cleanupPeerConnection(this);
-        });
-      }
-      async createOffer(options) {
-        const offer = await super.createOffer(options);
-        try { offer.sdp = forceStereoOpusSDP(offer.sdp); } catch (_) {}
-        return offer;
-      }
-      async createAnswer(options) {
-        const answer = await super.createAnswer(options);
-        try { answer.sdp = forceStereoOpusSDP(answer.sdp); } catch (_) {}
-        return answer;
-      }
-      async setLocalDescription(desc) {
-        if (desc && desc.sdp) {
-          try { desc = new RTCSessionDescription({ type: desc.type, sdp: forceStereoOpusSDP(desc.sdp) }); } catch (_) {}
-        }
-        return super.setLocalDescription(desc);
-      }
-      async setRemoteDescription(desc) {
-        if (desc && desc.sdp) {
-          try { desc = new RTCSessionDescription({ type: desc.type, sdp: forceStereoOpusSDP(desc.sdp) }); } catch (_) {}
-        }
-        const result = await super.setRemoteDescription(desc);
-        try { this.getSenders().forEach(watchSenderForTrackChanges); } catch (_) {}
-        return result;
-      }
-      addTrack(track, ...streams) {
-        const sender = super.addTrack(track, ...streams);
-        if (!track || track.kind !== "audio") return sender;
-        const bindChain = (processed) => {
-          const chain = AudioInterceptor.chains.find((entry) => entry.outStream?.getAudioTracks().includes(processed));
-          if (chain) chain.sender = sender;
-        };
-        if (track.__omniLordProcessed) { bindChain(track); return sender; }
-        AudioInterceptor.processTrack(track).then((processed) => {
-          if (processed && processed !== track && sender && typeof sender.replaceTrack === "function") {
-            bindChain(processed);
-            sender.replaceTrack(processed).catch(() => {});
-          }
-        }).catch(() => {});
-        return sender;
-      }
-      addStream(stream) {
-        const result = super.addStream(stream);
-        if (stream?.getAudioTracks) {
-          stream.getAudioTracks().forEach((track) => {
-            if (track.__omniLordProcessed) return;
-            AudioInterceptor.processTrack(track, stream).then((processed) => {
-              const sender = this.getSenders().find((item) => item.track === track);
-              if (processed && sender?.replaceTrack) sender.replaceTrack(processed).catch(() => {});
-            }).catch(() => {});
-          });
-        }
-        return result;
-      }
-      addTransceiver(trackOrKind, init) {
-        const isAudioKind = typeof trackOrKind === "string" ? trackOrKind === "audio" : (trackOrKind && trackOrKind.kind === "audio");
-        const hasUnprocessedTrack = trackOrKind && typeof trackOrKind === "object" && trackOrKind.kind === "audio" && !trackOrKind.__omniLordProcessed;
-        if (isAudioKind || hasUnprocessedTrack) {
-          const transceiver = super.addTransceiver(trackOrKind, init);
-          if (trackOrKind?.__omniLordProcessed && transceiver?.sender) {
-            const chain = AudioInterceptor.chains.find((entry) => entry.outStream?.getAudioTracks().includes(trackOrKind));
-            if (chain) chain.sender = transceiver.sender;
-          } else if (hasUnprocessedTrack) {
-            AudioInterceptor.processTrack(trackOrKind).then((processed) => {
-              if (processed && processed !== trackOrKind && transceiver?.sender?.replaceTrack) {
-                const chain = AudioInterceptor.chains.find((entry) => entry.outStream?.getAudioTracks().includes(processed));
-                if (chain) chain.sender = transceiver.sender;
-                transceiver.sender.replaceTrack(processed).catch(() => {});
-              }
-            }).catch(() => {});
-          }
-          if (transceiver?.sender) watchSenderForTrackChanges(transceiver.sender);
-          return transceiver;
-        }
-        return super.addTransceiver(trackOrKind, init);
-      }
-      close() {
-        cleanupPeerConnection(this);
-        return super.close();
-      }
-      setConfiguration(config) {
-        const result = super.setConfiguration(config);
-        try { this.getSenders().forEach(watchSenderForTrackChanges); } catch (_) {}
-        return result;
-      }
-    };
-    Object.defineProperty(window.RTCPeerConnection, "name", { value: "RTCPeerConnection" });
-  }
-
-  if (nativeReplaceTrack) {
-    window.RTCRtpSender.prototype.replaceTrack = async function (track) {
-      if (track?.kind === "audio" && !track.__omniLordProcessed) {
-        track = await AudioInterceptor.processTrack(track);
-      }
-      if (track?.kind === "audio" && track.__omniLordProcessed) {
-        const chain = AudioInterceptor.chains.find((entry) => entry.outStream?.getAudioTracks().includes(track));
-        if (chain) chain.sender = this;
-      }
-      return nativeReplaceTrack.call(this, track);
-    };
-  }
-
-  if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-    const origGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    navigator.mediaDevices.getUserMedia = async function (constraints) {
-      const requestedAudio = wantsAudio(constraints);
-      let stream;
-      try {
-        if (requestedAudio) {
-          const audioIn = constraints.audio === true || constraints === true ? {} : { ...constraints.audio };
-          const next = {
-            ...(typeof constraints === "object" && constraints !== true ? constraints : {}),
-            audio: {
-              ...audioIn,
-              echoCancellation: false,
-              noiseSuppression: false,
-              autoGainControl: false,
-              channelCount: 2,
-              sampleRate: 48000,
-              sampleSize: 16
-            }
-          };
-          stream = await origGetUserMedia(next);
-        } else {
-          stream = await origGetUserMedia(constraints);
-        }
-      } catch (err) {
-        stream = await origGetUserMedia(constraints);
-      }
-      if (requestedAudio && stream.getAudioTracks().length > 0) {
-        return currentState.enabled ? await AudioInterceptor.intercept(stream) : stream;
-      }
-      return stream;
-    };
-  }
-
-  ["getUserMedia", "webkitGetUserMedia"].forEach((name) => {
-    const legacy = navigator[name];
-    if (typeof legacy !== "function" || legacy.__omniLordWrapped) return;
-    const wrapped = function (constraints, success, failure) {
-      const onSuccess = (stream) => {
-        if (!wantsAudio(constraints) || !currentState.enabled) return success(stream);
-        AudioInterceptor.intercept(stream).then(success).catch(() => success(stream));
-      };
-      return legacy.call(navigator, constraints, onSuccess, failure);
-    };
-    wrapped.__omniLordWrapped = true;
-    try { navigator[name] = wrapped; } catch (_) {}
+  /* ============================ CALL RESILIENCE ============================ */
+  // Extend the original saturated engine. The source snapshot is in original/.
+  window.__OmniAudioResilience.enhance({
+    AudioInterceptor, currentState, ensureProcessingContext, PlayerEngine,
+    getWorkletReady: () => workletPromise
+  });
+  window.__OmniCallGuard.install({
+    AudioInterceptor, currentState, ensureProcessingContext, wantsAudio,
+    report: (message) => window.__OmniLordPanelReady?.setStatus(message)
   });
 
   /* ============================ UI CONTROLLER ============================ */
@@ -1076,12 +881,17 @@
       const canvas = document.getElementById("oul-bg-canvas");
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
-      const renderBg = () => {
+      let lastFrame = 0;
+      const renderBg = (timestamp = 0) => {
         requestAnimationFrame(renderBg);
+        if (document.hidden || currentState.collapsed || timestamp - lastFrame < 50 || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+        lastFrame = timestamp;
         const panel = document.getElementById("oul-panel");
         if (!panel) return;
-        const w = canvas.width = panel.offsetWidth || 300;
-        const h = canvas.height = panel.offsetHeight || 560;
+        const w = panel.offsetWidth || 300;
+        const h = panel.offsetHeight || 560;
+        if (canvas.width !== w) canvas.width = w;
+        if (canvas.height !== h) canvas.height = h;
         ctx.clearRect(0, 0, w, h);
         ctx.fillStyle = "#ffffff";
         this.bgParticles.forEach((p) => {
@@ -1101,16 +911,20 @@
       const canvas = document.getElementById("oul-canvas");
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
-      const render = () => {
+      let lastFrame = 0, dataArray;
+      const render = (timestamp = 0) => {
         requestAnimationFrame(render);
-        if (currentState.collapsed) return;
-        const width = canvas.width = canvas.offsetWidth || 280;
-        const height = canvas.height = canvas.offsetHeight || 54;
+        if (currentState.collapsed || document.hidden || timestamp - lastFrame < 50) return;
+        lastFrame = timestamp;
+        const width = canvas.offsetWidth || 280;
+        const height = canvas.offsetHeight || 54;
+        if (canvas.width !== width) canvas.width = width;
+        if (canvas.height !== height) canvas.height = height;
         ctx.clearRect(0, 0, width, height);
         const analyser = window.__OmniLordAnalyser;
         if (analyser) {
           const bufferLength = analyser.frequencyBinCount;
-          const dataArray = new Uint8Array(bufferLength);
+          if (!dataArray || dataArray.length !== bufferLength) dataArray = new Uint8Array(bufferLength);
           analyser.getByteFrequencyData(dataArray);
           const barWidth = (width / bufferLength) * 2;
           let x = 0;
@@ -1633,8 +1447,8 @@
         if (!isDragging) return;
         if (e && e.cancelable) e.preventDefault();
         const dx = clientX - startX, dy = clientY - startY;
-        const maxX = window.innerWidth - panel.offsetWidth;
-        const maxY = window.innerHeight - panel.offsetHeight;
+        const maxX = Math.max(0, window.innerWidth - panel.offsetWidth);
+        const maxY = Math.max(0, window.innerHeight - panel.offsetHeight);
         const nextX = Math.min(Math.max(0, initialLeft + dx), maxX);
         const nextY = Math.min(Math.max(0, initialTop + dy), maxY);
         panel.style.left = nextX + "px"; panel.style.top = nextY + "px";
