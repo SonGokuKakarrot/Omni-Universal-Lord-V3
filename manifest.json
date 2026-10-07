@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Omni Universal Lord V2",
+  "version": "2.2.0",
+  "description": "Maximum-loudness microphone booster, call music mixer and clarity DSP for web audio/video calls.",
+  "minimum_chrome_version": "111",
+  "content_scripts": [
+    {
+      "matches": [
+        "*://www.instagram.com/*",
+        "*://*.instagram.com/*",
+        "*://instagram.com/*",
+        "*://web.whatsapp.com/*",
+        "*://*.whatsapp.com/*",
+        "*://web.imo.im/*",
+        "*://*.imo.im/*",
+        "*://www.messenger.com/*",
+        "*://*.messenger.com/*",
+        "*://messenger.com/*",
+        "*://www.facebook.com/*",
+        "*://*.facebook.com/*",
+        "*://facebook.com/*",
+        "*://discord.com/*",
+        "*://*.discord.com/*",
+        "*://web.telegram.org/*",
+        "*://*.telegram.org/*",
+        "*://webogram.org/*",
+        "*://*.webogram.org/*",
+        "*://web.telegram.im/*",
+        "*://*.telegram.im/*",
+        "*://web.tlgrm.ru/*",
+        "*://*.tlgrm.ru/*",
+        "*://web.tel.onl/*",
+        "*://*.tel.onl/*"
+      ],
+      "js": ["injector.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}
