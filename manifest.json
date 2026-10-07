@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Omni Universal Lord V2",
-  "version": "2.2.0",
-  "description": "Maximum-loudness microphone booster, call music mixer and clarity DSP for web audio/video calls.",
+  "version": "2.3.0",
+  "description": "Saturated microphone boost, call music mixer, shared-track recovery and live WebRTC audio diagnostics.",
   "minimum_chrome_version": "111",
   "content_scripts": [
     {
@@ -33,10 +33,19 @@
         "*://web.tel.onl/*",
         "*://*.tel.onl/*"
       ],
-      "js": ["injector.js"],
+      "js": [
+        "audio-resilience.js",
+        "call-guard.js",
+        "injector.js",
+        "enhancement-ui.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
-      "world": "MAIN"
+      "world": "MAIN",
+      "css": [
+        "enhancement-ui.css"
+      ],
+      "match_about_blank": true
     }
   ]
 }
